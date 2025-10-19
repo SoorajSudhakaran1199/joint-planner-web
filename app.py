@@ -1,213 +1,305 @@
-#!/usr/bin/env python3
-from __future__ import annotations
-import csv, io, math
-from dataclasses import dataclass
-from typing import List
-from urllib.parse import quote
-
+# app.py
+import os
+import io
+import csv
+import math
 import numpy as np
-from flask import Flask, render_template, request
+from flask import Flask, request, jsonify, render_template, send_file, abort
 
-app = Flask(__name__)
+# Optional CORS
+try:
+    from flask_cors import CORS
+    CORS_ENABLED = True
+except Exception:
+    CORS_ENABLED = False
 
-# ----------------- Robot + planner core -----------------
+app = Flask(__name__, template_folder="templates", static_folder="static")
+if CORS_ENABLED:
+    CORS(app)
 
-@dataclass
-class RobotModel:
-    name: str
-    dof: int
-    theta_offset: np.ndarray
-    d: np.ndarray
-    a: np.ndarray
-    alpha: np.ndarray
-    q_min: np.ndarray
-    q_max: np.ndarray
+# -----------------------------------------------------------------------------
+# Hook these to your existing implementations.
+# Expect:
+#   plan_rrt_connect(start_q, goal_q, obstacles, knobs) -> dict
+#   resample_path(path_rad, n_points) -> list[list[float]]
+#   fk_ee_mm(q_rad) -> (x, y, z) in millimeters  (rename here if needed)
+#
+# If they live in another module, import them at the top.
+# -----------------------------------------------------------------------------
 
-    def fk_all(self, q: np.ndarray) -> List[np.ndarray]:
-        T = np.eye(4); frames = []
-        for i in range(self.dof):
-            th = q[i] + self.theta_offset[i]
-            d, a, al = float(self.d[i]), float(self.a[i]), float(self.alpha[i])
-            ct, st = math.cos(th), math.sin(th)
-            ca, sa = math.cos(al), math.sin(al)
-            A = np.array([[ct, -st*ca,  st*sa,  a*ct],
-                          [st,  ct*ca, -ct*sa,  a*st],
-                          [0.0,    sa,     ca,    d],
-                          [0.0,   0.0,    0.0,  1.0]])
-            T = T @ A
-            frames.append(T.copy())
-        return frames
+# ---------- Advisory helpers ----------
+UR5E_REACH_M = 0.85  # ~850 mm reach (meters)
 
-    @staticmethod
-    def ur5e() -> "RobotModel":
-        a = np.array([0, -0.425, -0.39225, 0, 0, 0], float)
-        d = np.array([0.1625, 0, 0, 0.1333, 0.0997, 0.0996], float)
-        alpha = np.array([math.pi/2, 0, 0, math.pi/2, -math.pi/2, 0], float)
-        theta_offset = np.zeros(6)
-        q_min = np.radians([-360]*6); q_max = np.radians([360]*6)
-        return RobotModel("UR5e", 6, theta_offset, d, a, alpha, q_min, q_max)
+def _box_clearance_to_point_mm(box, p):
+    """
+    Min distance from point p=(x,y,z) mm to axis-aligned box.
+    Negative => inside/penetrating.
+    """
+    cx, cy, cz, L, W, H = box["cx"], box["cy"], box["cz"], box["L"], box["W"], box["H"]
+    min_x, max_x = cx - L/2.0, cx + L/2.0
+    min_y, max_y = cy - W/2.0, cy + W/2.0
+    min_z, max_z = cz - H/2.0, cz + H/2.0
+    dx = max(min_x - p[0], 0, p[0] - max_x)
+    dy = max(min_y - p[1], 0, p[1] - max_y)
+    dz = max(min_z - p[2], 0, p[2] - max_z)
+    if (min_x <= p[0] <= max_x) and (min_y <= p[1] <= max_y) and (min_z <= p[2] <= max_z):
+        pen = min(p[0]-min_x, max_x-p[0], p[1]-min_y, max_y-p[1], p[2]-min_z, max_z-p[2])
+        return -pen
+    return (dx*dx + dy*dy + dz*dz) ** 0.5
 
-@dataclass
-class Box:
-    center: np.ndarray  # meters
-    size:   np.ndarray  # meters
-    def bounds(self):
-        s2 = self.size/2.0
-        return self.center - s2, self.center + s2
+def _recommend_waypoints_from_path(path_rad):
+    """
+    Heuristic: keep <= ~5 deg per-joint step and ~0.12 rad step length.
+    Returns recommended minimum waypoint count.
+    """
+    import numpy as np, math
+    if not path_rad or len(path_rad) < 2:
+        return 10
+    arr = np.array(path_rad)
+    segs = np.linalg.norm(arr[1:] - arr[:-1], axis=1)  # joint-space step (rad)
+    L = float(segs.sum())
+    max_per_joint_deg = float(np.max(np.abs(np.rad2deg(arr[1:] - arr[:-1]))))
+    n_len = max(2, int(math.ceil(L / 0.12)))
+    n_joint = max(2, int(math.ceil(max_per_joint_deg / 5.0)) + 1)
+    return max(n_len + 1, n_joint + 1)
 
-def collision(robot: RobotModel, q: np.ndarray, boxes: List[Box], margin: float) -> bool:
-    frames = robot.fk_all(q)
-    pts = [T[:3,3] for T in frames]
-    for i in range(len(frames)-1):
-        pts.append((frames[i][:3,3] + frames[i+1][:3,3]) * 0.5)
-    for b in boxes:
-        bmin, bmax = b.bounds()
-        for p in pts:
-            if np.all(p >= (bmin - margin)) and np.all(p <= (bmax + margin)):
-                return True
-    return False
+def _recommend_knobs_on_failure(knobs):
+    """Conservative tweaks that usually help without huge runtime."""
+    k = dict(knobs or {})
+    k.setdefault("max_iters", 2000)
+    k.setdefault("shortcut_passes", 30)
+    recs = []
+    if k["max_iters"] < 4000:
+        recs.append(("max_iters", max(3000, k["max_iters"] * 2)))
+    if k.get("safety_margin_m", 0.003) > 0.002:
+        recs.append(("safety_margin_m", 0.002))
+    if k.get("bias", 0.2) < 0.35:
+        recs.append(("bias", 0.35))
+    if k.get("step_rad", 0.05) > 0.06:
+        recs.append(("step_rad", 0.05))
+    return recs
 
-def segment_free(robot, qa, qb, boxes, margin, res=0.03):
-    n = max(2, int(np.linalg.norm(qb-qa)/res))
-    for t in np.linspace(0,1,n):
-        q = qa + t*(qb-qa)
-        if collision(robot, q, boxes, margin): return False
-    return True
+def _workspace_advice(start_q, goal_q, obstacles, fk_func):
+    """
+    Spatial suggestions based on reach and clearances near the goal.
+    fk_func(q) -> (x,y,z) in mm.
+    """
+    adv = {"notes": [], "obstacle_moves": []}
+    try:
+        ee_goal = fk_func(goal_q)
+    except Exception:
+        ee_goal = None
 
-class Node:
-    __slots__=("q","parent")
-    def __init__(self, q, parent): self.q, self.parent = q, parent
-
-def rrt_connect(robot, q_start, q_goal, boxes, margin,
-                step=0.10, iters=30000, goal_bias=0.25, res=0.03):
-    if collision(robot, q_start, boxes, margin) or collision(robot, q_goal, boxes, margin):
-        return None
-    if segment_free(robot, q_start, q_goal, boxes, margin, res):
-        return [q_start, q_goal]
-
-    trees = [[Node(q_start, None)], [Node(q_goal, None)]]
-    def nearest(T, q): return min(range(len(T)), key=lambda i: np.linalg.norm(T[i].q - q))
-    def steer(a, b):
-        d = b - a; n = np.linalg.norm(d)
-        return b if n <= step else a + (d/n)*step
-
-    for k in range(iters):
-        a, b = (0,1) if k%2==0 else (1,0)
-        qr = trees[b][0].q if np.random.rand() < goal_bias else np.random.uniform(robot.q_min, robot.q_max)
-        ia = nearest(trees[a], qr); qa = trees[a][ia].q
-        q_new = steer(qa, qr)
-        if not segment_free(robot, qa, q_new, boxes, margin, res): continue
-        trees[a].append(Node(q_new, ia))
-
-        ib = nearest(trees[b], q_new); qb = trees[b][ib].q
-        q_probe = q_new; parent = len(trees[a]) - 1
-        while True:
-            q_next = steer(q_probe, qb)
-            if not segment_free(robot, q_probe, q_next, boxes, margin, res): break
-            trees[a].append(Node(q_next, parent))
-            parent = len(trees[a]) - 1; q_probe = q_next
-            if np.allclose(q_probe, qb, atol=1e-3):
-                def path(T, i):
-                    out=[]
-                    while i is not None:
-                        out.append(T[i].q); i=T[i].parent
-                    return out[::-1]
-                p1 = path(trees[a], parent)
-                p2 = path(trees[b], ib)
-                if a==1: p1, p2 = p2, p1
-                return p1 + p2[::-1][1:]
-    return None
-
-def shortcut(path, robot, boxes, margin, res=0.03, attempts=400):
-    if len(path)<=2: return path
-    p=list(path)
-    for _ in range(attempts):
-        i = np.random.randint(0,len(p)-2)
-        j = np.random.randint(i+2,len(p))
-        if segment_free(robot,p[i],p[j],boxes,margin,res):
-            p = p[:i+1] + p[j:]
-    return p
-
-def resample_to_n(path: List[np.ndarray], N: int) -> List[np.ndarray]:
-    if len(path)==1: return [path[0]]*N
-    segs=[(path[i],path[i+1]) for i in range(len(path)-1)]
-    lens=[np.linalg.norm(b-a) for a,b in segs]; L=float(np.sum(lens))
-    if L<1e-9: return [path[0] for _ in range(N)]
-    s_targets=np.linspace(0,L,N); out=[]; acc=0.0; i=0; a,b=segs[0]
-    for s in s_targets:
-        while i<len(lens)-1 and acc+lens[i]<s:
-            acc+=lens[i]; i+=1; a,b=segs[i]
-        u=0.0 if lens[i]==0 else (s-acc)/lens[i]
-        out.append(a+u*(b-a))
-    return out
-
-def plan(start_deg, goal_deg, n_waypoints, obstacles_mm,
-         safety_margin=0.005, step=0.10, iters=30000, goal_bias=0.25, res=0.03):
-    robot = RobotModel.ur5e()
-    q_start = np.radians(np.asarray(start_deg, float))
-    q_goal  = np.radians(np.asarray(goal_deg,  float))
-    boxes=[Box(center=np.array([cx,cy,cz])/1000.0, size=np.array([L,W,H])/1000.0)
-           for (cx,cy,cz,L,W,H) in obstacles_mm]
-    path = rrt_connect(robot, q_start, q_goal, boxes, safety_margin, step, iters, goal_bias, res)
-    if path is None:
-        raise RuntimeError("No collision-free path. Adjust goal/obstacles/safety margin.")
-    path = shortcut(path, robot, boxes, safety_margin, res)
-    return [list(np.degrees(q)) for q in resample_to_n(path, n_waypoints)]
-
-# ----------------- Web routes -----------------
-
-@app.route("/", methods=["GET"])
-def index():
-    return render_template("index.html",
-        n_waypoints=5,
-        start_deg="-1.72, -98.96, -126.22, -46.29, 91.39, -1.78",
-        goal_deg="80.0, -90.0, -90.0, -90.0, 90.0, 0.0",
-        obstacles="73.865, 639.614, 360.0, 800.0, 500.0, 720.0",
-        safety_margin=0.005, rrt_step=0.10, rrt_iters=30000, rrt_goal_bias=0.25, seg_res=0.03
+    adv["notes"].append(
+        f"UR5e nominal reach ≈ {int(UR5E_REACH_M*1000)} mm from base. "
+        "Keep obstacle faces ≥ 120 mm away from the end-effector target if possible."
     )
 
-def _angles(s: str):
-    parts=[p for p in s.replace(","," ").replace(";"," ").split() if p]
-    vals=[float(x) for x in parts]
-    if len(vals)!=6: raise ValueError("Provide exactly 6 joint angles (deg).")
-    return vals
+    if ee_goal is not None and obstacles:
+        min_c, min_box = None, None
+        for b in obstacles:
+            c = _box_clearance_to_point_mm(b, ee_goal)
+            if (min_c is None) or (c < min_c):
+                min_c, min_box = c, b
+        if min_c is not None:
+            if min_c < 0:
+                adv["notes"].append(
+                    "Goal appears to intersect an obstacle volume. Shift the goal or move that box."
+                )
+            elif min_c < 80:
+                adv["notes"].append(
+                    f"Goal clearance to the closest box is tight (~{int(min_c)} mm). "
+                    "Increase spacing to ≥ 120–150 mm."
+                )
+                dx = ee_goal[0] - min_box["cx"]
+                dy = ee_goal[1] - min_box["cy"]
+                dz = ee_goal[2] - min_box["cz"]
+                axis, sign = max(
+                    [(abs(dx), ("x", 1 if dx >= 0 else -1)),
+                     (abs(dy), ("y", 1 if dy >= 0 else -1)),
+                     (abs(dz), ("z", 1 if dz >= 0 else -1))],
+                    key=lambda t: t[0]
+                )[1]
+                shift = max(150 - int(min_c), 60)
+                adv["obstacle_moves"].append(
+                    f"Move the closest box ~{shift} mm along {'+' if sign>0 else '-'}{axis} away from the goal."
+                )
+    return adv
+# ---------- /Advisory helpers ----------
 
-def _boxes(s: str):
-    out=[]
-    for ln in s.splitlines():
-        ln=ln.strip()
-        if not ln: continue
-        parts=[p for p in ln.replace(","," ").replace(";"," ").split() if p]
-        if len(parts)!=6: raise ValueError("Each obstacle line must be 6 numbers: cx cy cz L W H (mm).")
-        out.append(tuple(float(x) for x in parts))
-    if not out: raise ValueError("Provide at least one obstacle.")
+# ---------- Utils ----------
+def _to_deg(path_rad):
+    return [[math.degrees(x) for x in q] for q in path_rad]
+
+def _validate_shape(q, name):
+    if not isinstance(q, (list, tuple)) or len(q) != 6:
+        abort(400, f"{name} must be length-6 joint array (rad).")
+
+def _parse_boxes_text(boxes_text):
+    obstacles = []
+    if boxes_text:
+        for line in boxes_text.splitlines():
+            if not line.strip():
+                continue
+            cx, cy, cz, L, W, H = [float(v) for v in line.split()]
+            obstacles.append({"cx":cx,"cy":cy,"cz":cz,"L":L,"W":W,"H":H})
+    return obstacles
+
+def _parse_boxes_json(obstacles):
+    out = []
+    for i, b in enumerate(obstacles or []):
+        try:
+            cx = float(b["cx"]); cy = float(b["cy"]); cz = float(b["cz"])
+            L  = float(b["L"]);  W  = float(b["W"]);  H  = float(b["H"])
+        except Exception:
+            abort(400, f"Obstacle {i} missing/invalid numeric fields.")
+        out.append({"cx": cx, "cy": cy, "cz": cz, "L": L, "W": W, "H": H})
     return out
+# ---------- /Utils ----------
+
+# ---------- Routes ----------
+@app.route("/", methods=["GET"])
+def index():
+    return render_template("index.html")
 
 @app.route("/plan", methods=["POST"])
-def do_plan():
+def results():
+    # HTML form
     try:
-        n_waypoints = int(request.form["n_waypoints"])
-        start_deg   = _angles(request.form["start_deg"])
-        goal_deg    = _angles(request.form["goal_deg"])
-        obstacles   = _boxes(request.form["obstacles"])
-        safety_margin = float(request.form["safety_margin"])
-        rrt_step      = float(request.form["rrt_step"])
-        rrt_iters     = int(request.form["rrt_iters"])
-        rrt_goal_bias = float(request.form["rrt_goal_bias"])
-        seg_res       = float(request.form["seg_res"])
-
-        wps = plan(start_deg, goal_deg, n_waypoints, obstacles,
-                   safety_margin=safety_margin, step=rrt_step, iters=rrt_iters,
-                   goal_bias=rrt_goal_bias, res=seg_res)
-
-        buf = io.StringIO(); w = csv.writer(buf)
-        w.writerow([f"J{i+1}" for i in range(6)])
-        for q in wps: w.writerow([f"{v:.6f}" for v in q])
-        csv_url = "data:text/csv;charset=utf-8," + quote(buf.getvalue())
-
-        return render_template("results.html", waypoints=wps, csv_url=csv_url, error=None)
+        start_deg = [float(x) for x in request.form.get("start_deg","").replace(",", " ").split()]
+        goal_deg  = [float(x) for x in request.form.get("goal_deg","").replace(",", " ").split()]
+        n_waypoints = int(request.form.get("n_waypoints","20"))
+        boxes_text  = request.form.get("boxes","").strip()
+        knobs = {
+            "max_iters": int(request.form.get("max_iters","2000")),
+            "step_rad": float(request.form.get("step_rad","0.05")),
+            "bias": float(request.form.get("bias","0.2")),
+            "safety_margin_m": float(request.form.get("safety_margin_m","0.003")),
+            "shortcut_passes": int(request.form.get("shortcut_passes","30")),
+        }
+        start_q = [math.radians(x) for x in start_deg]
+        goal_q  = [math.radians(x) for x in goal_deg]
+        obstacles = _parse_boxes_text(boxes_text)
     except Exception as e:
-        return render_template("results.html", waypoints=[], csv_url=None, error=str(e))
+        return render_template("results.html", error=f"Bad input: {e}", advice=None)
+
+    _validate_shape(start_q, "start")
+    _validate_shape(goal_q, "goal")
+
+    plan = plan_rrt_connect(start_q, goal_q, obstacles, knobs)
+
+    # Build advice (best effort if FK present)
+    advice = {"notes": [], "obstacle_moves": [], "recommend_waypoints": None}
+    try:
+        advice.update(_workspace_advice(start_q, goal_q, obstacles, fk_func=fk_ee_mm))
+    except Exception:
+        pass
+
+    if not plan.get("success", False):
+        advice["notes"].append("Planner failed. Try these knob changes:")
+        for kname, v in _recommend_knobs_on_failure(knobs):
+            advice["notes"].append(f"• {kname} → {v}")
+        return render_template("results.html",
+                               error=f"No path: {plan.get('reason','unknown')}",
+                               advice=advice)
+
+    path_rad = plan["path_rad"]
+    path_rad = resample_path(path_rad, n_waypoints)
+    path_deg = _to_deg(path_rad)
+
+    try:
+        advice["recommend_waypoints"] = _recommend_waypoints_from_path(path_rad)
+    except Exception:
+        advice["recommend_waypoints"] = None
+
+    return render_template("results.html",
+                           path_deg=path_deg,
+                           n=len(path_deg),
+                           iters=plan.get("iters"),
+                           time_sec=plan.get("time_sec"),
+                           reason=plan.get("reason"),
+                           csv_download=True,
+                           advice=advice)
+
+@app.route("/download.csv", methods=["POST"])
+def download_csv():
+    data = request.get_json(silent=True) or {}
+    path_deg = data.get("path_deg")
+    if not isinstance(path_deg, list) or not path_deg:
+        abort(400, "path_deg missing.")
+    buf = io.StringIO()
+    cw = csv.writer(buf)
+    cw.writerow([f"J{i+1} (deg)" for i in range(6)])
+    for q in path_deg:
+        cw.writerow([f"{float(v):.6f}" for v in q])
+    return send_file(
+        io.BytesIO(buf.getvalue().encode("utf-8")),
+        mimetype="text/csv",
+        as_attachment=True,
+        download_name="waypoints.csv",
+    )
+
+@app.route("/api/plan", methods=["POST"])
+def api_plan():
+    body = request.get_json(silent=False, force=True)
+    if body is None:
+        abort(400, "JSON body required.")
+    start_q = body.get("start_rad")
+    goal_q  = body.get("goal_rad")
+    _validate_shape(start_q, "start_rad")
+    _validate_shape(goal_q,  "goal_rad")
+
+    n_waypoints = int(body.get("n_waypoints", 20))
+    knobs = body.get("knobs", {}) or {}
+    obstacles = _parse_boxes_json(body.get("obstacles", []))
+    return_degrees = bool(body.get("return_degrees", True))
+
+    plan = plan_rrt_connect(start_q, goal_q, obstacles, knobs)
+
+    # advice
+    advice = None
+    try:
+        advice = _workspace_advice(start_q, goal_q, obstacles, fk_func=fk_ee_mm)
+    except Exception:
+        advice = None
+
+    resp = {
+        "success": bool(plan.get("success", False)),
+        "iters": int(plan.get("iters", 0)),
+        "time_sec": float(plan.get("time_sec", 0.0)),
+        "reason": plan.get("reason", None),
+        "advice": advice,
+    }
+    if not resp["success"]:
+        if advice:
+            resp["advice"]["knob_tweaks"] = _recommend_knobs_on_failure(knobs)
+        return jsonify(resp), 200
+
+    path_rad = plan["path_rad"]
+    path_rad = resample_path(path_rad, n_waypoints)
+
+    if return_degrees:
+        resp["path"] = _to_deg(path_rad)
+        resp["units"] = "deg"
+    else:
+        resp["path"] = path_rad
+        resp["units"] = "rad"
+
+    resp["num_waypoints"] = len(resp["path"])
+    segs = []
+    for a, b in zip(path_rad[:-1], path_rad[1:]):
+        segs.append(float(np.linalg.norm(np.array(b) - np.array(a))))
+    resp["joint_path_length_rad"] = float(sum(segs))
+    try:
+        resp.setdefault("advice", {})["recommend_waypoints"] = _recommend_waypoints_from_path(path_rad)
+    except Exception:
+        pass
+
+    return jsonify(resp), 200
+
+@app.route("/healthz")
+def healthz():
+    return "ok", 200
 
 if __name__ == "__main__":
-    app.run(debug=True)
+    app.run(host="0.0.0.0", port=int(os.environ.get("PORT", 5000)), debug=True)
