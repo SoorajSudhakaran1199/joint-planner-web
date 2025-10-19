@@ -2,54 +2,89 @@
 <html>
 <head>
   <meta charset="utf-8">
-  <title>Joint Path Planner — Input</title>
-  <link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}">
-  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Joint Path Planner</title>
+  <link rel="stylesheet" href="/static/style.css">
 </head>
 <body>
-<header><h1>Joint Path Planner</h1></header>
-
-<main>
-  <form class="card" method="post" action="{{ url_for('do_plan') }}">
-    <div class="row">
-      <label>Number of Waypoints</label>
-      <input type="number" name="n_waypoints" value="{{ n_waypoints }}" min="2" required>
+  <header class="hero">
+    <div class="hero-left">
+      <img src="/static/images/ur5e.png" alt="UR5e Robot" class="hero-img" />
     </div>
-
-    <div class="row">
-      <label>Start Joints (deg)</label>
-      <textarea name="start_deg" rows="2" required>{{ start_deg }}</textarea>
-      <small>6 values separated by spaces or commas</small>
-    </div>
-
-    <div class="row">
-      <label>Target Joints (deg)</label>
-      <textarea name="goal_deg" rows="2" required>{{ goal_deg }}</textarea>
-    </div>
-
-    <div class="row">
-      <label>Obstacles (mm)</label>
-      <textarea name="obstacles" rows="3" required>{{ obstacles }}</textarea>
-      <small>One per line: <code>cx cy cz L W H</code>. If Z=0 is floor, use <code>cz = H/2</code>.</small>
-    </div>
-
-    <details class="advanced">
-      <summary>Advanced</summary>
-      <div class="grid2">
-        <div><label>Safety Margin (m)</label><input name="safety_margin" type="number" step="0.001" value="{{ safety_margin }}"></div>
-        <div><label>RRT Step (rad)</label><input name="rrt_step" type="number" step="0.01" value="{{ rrt_step }}"></div>
-        <div><label>RRT Iterations</label><input name="rrt_iters" type="number" step="1000" value="{{ rrt_iters }}"></div>
-        <div><label>RRT Goal Bias</label><input name="rrt_goal_bias" type="number" step="0.05" value="{{ rrt_goal_bias }}"></div>
-        <div><label>Collision Sample (seg_res)</label><input name="seg_res" type="number" step="0.01" value="{{ seg_res }}"></div>
+    <div class="hero-right">
+      <h1>Joint Path Planner</h1>
+      <p class="subtitle">UR5e planner with collision-aware RRT + shortcut smoothing</p>
+      <div class="badge-row">
+        <span class="badge">UR5e</span>
+        <span class="badge">RRT-Connect</span>
+        <span class="badge">CSV Export</span>
       </div>
-    </details>
-
-    <div class="actions">
-      <button type="submit">Find Waypoints</button>
     </div>
-  </form>
-</main>
+  </header>
 
-<footer>UR5e demo — collision-aware RRT</footer>
+  <main class="grid">
+    <aside class="card robot-card">
+      <img src="/static/images/ur5e.png" alt="UR5e" class="robot-img">
+      <div class="robot-meta">
+        <h3>Robot model</h3>
+        <ul>
+          <li>6 DOF (UR5e)</li>
+          <li>Joint-space planning</li>
+          <li>Obstacles: AABB boxes</li>
+        </ul>
+        <details>
+          <summary>Tips</summary>
+          <ul class="tips">
+            <li>If Z=0 is floor, use cz = H/2.</li>
+            <li>No path? Lower safety margin or move the goal.</li>
+            <li>Programmatic use: POST /api/plan</li>
+          </ul>
+        </details>
+      </div>
+    </aside>
+
+    <section class="card form-card">
+      <form method="post" action="/plan">
+        <label>Number of Waypoints
+          <input type="number" name="n_waypoints" value="20" min="2" max="200" required>
+        </label>
+
+        <label>Start Joints (deg)
+          <textarea name="start_deg" placeholder="-90, -45, 0, 0, 45, 0"></textarea>
+          <small>6 values separated by spaces or commas</small>
+        </label>
+
+        <label>Target Joints (deg)
+          <textarea name="goal_deg" placeholder="80, -90, -90, -90, 90, 0"></textarea>
+        </label>
+
+        <label>Obstacles (mm)
+          <textarea name="boxes" placeholder="cx cy cz L W H — one box per line"></textarea>
+          <small>Tip: if Z=0 is floor, use cz = H/2 so the box sits on the floor.</small>
+        </label>
+
+        <details class="advanced">
+          <summary>Advanced</summary>
+          <div class="grid-2">
+            <label>Max Iters <input type="number" name="max_iters" value="2000"></label>
+            <label>Step (rad) <input type="number" step="0.01" name="step_rad" value="0.05"></label>
+            <label>Goal Bias <input type="number" step="0.01" name="bias" value="0.2"></label>
+            <label>Safety Margin (m) <input type="number" step="0.001" name="safety_margin_m" value="0.003"></label>
+            <label>Shortcut Passes <input type="number" name="shortcut_passes" value="30"></label>
+          </div>
+        </details>
+
+        <button class="btn-primary" type="submit">Find Waypoints</button>
+      </form>
+    </section>
+  </main>
+
+  <footer class="foot">
+    <span>UR5e demo — collision-aware RRT</span>
+    <a href="/" class="mini-link">Home</a>
+  </footer>
+
+  <footer class="watermark">
+    <p>Made by Sooraj</p>
+  </footer>
 </body>
 </html>
