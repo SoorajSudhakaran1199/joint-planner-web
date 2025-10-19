@@ -1,0 +1,44 @@
+<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <title>Joint Path Planner — Results</title>
+  <link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+</head>
+<body>
+<header><h1>Planned Waypoints</h1></header>
+
+<main>
+  {% if error %}
+    <div class="card error">
+      <h3>Planning failed</h3>
+      <p>{{ error }}</p>
+      <a class="btn" href="{{ url_for('index') }}">Back</a>
+    </div>
+  {% else %}
+    <div class="card">
+      <table>
+        <thead>
+          <tr><th>#</th><th>J1</th><th>J2</th><th>J3</th><th>J4</th><th>J5</th><th>J6</th></tr>
+        </thead>
+        <tbody>
+          {% for i, q in enumerate(waypoints, start=1) %}
+          <tr>
+            <td>{{ i }}</td>
+            {% for v in q %}<td>{{ '%.2f'|format(v) }}</td>{% endfor %}
+          </tr>
+          {% endfor %}
+        </tbody>
+      </table>
+      <div class="actions">
+        <a class="btn" href="{{ csv_url }}" download="planned_waypoints_deg.csv">Download CSV</a>
+        <a class="btn secondary" href="{{ url_for('index') }}">Back</a>
+      </div>
+    </div>
+  {% endif %}
+</main>
+
+<footer>UR5e demo — collision-aware RRT</footer>
+</body>
+</html>

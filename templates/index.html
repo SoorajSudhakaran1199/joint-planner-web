@@ -1,0 +1,55 @@
+<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <title>Joint Path Planner — Input</title>
+  <link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+</head>
+<body>
+<header><h1>Joint Path Planner</h1></header>
+
+<main>
+  <form class="card" method="post" action="{{ url_for('do_plan') }}">
+    <div class="row">
+      <label>Number of Waypoints</label>
+      <input type="number" name="n_waypoints" value="{{ n_waypoints }}" min="2" required>
+    </div>
+
+    <div class="row">
+      <label>Start Joints (deg)</label>
+      <textarea name="start_deg" rows="2" required>{{ start_deg }}</textarea>
+      <small>6 values separated by spaces or commas</small>
+    </div>
+
+    <div class="row">
+      <label>Target Joints (deg)</label>
+      <textarea name="goal_deg" rows="2" required>{{ goal_deg }}</textarea>
+    </div>
+
+    <div class="row">
+      <label>Obstacles (mm)</label>
+      <textarea name="obstacles" rows="3" required>{{ obstacles }}</textarea>
+      <small>One per line: <code>cx cy cz L W H</code>. If Z=0 is floor, use <code>cz = H/2</code>.</small>
+    </div>
+
+    <details class="advanced">
+      <summary>Advanced</summary>
+      <div class="grid2">
+        <div><label>Safety Margin (m)</label><input name="safety_margin" type="number" step="0.001" value="{{ safety_margin }}"></div>
+        <div><label>RRT Step (rad)</label><input name="rrt_step" type="number" step="0.01" value="{{ rrt_step }}"></div>
+        <div><label>RRT Iterations</label><input name="rrt_iters" type="number" step="1000" value="{{ rrt_iters }}"></div>
+        <div><label>RRT Goal Bias</label><input name="rrt_goal_bias" type="number" step="0.05" value="{{ rrt_goal_bias }}"></div>
+        <div><label>Collision Sample (seg_res)</label><input name="seg_res" type="number" step="0.01" value="{{ seg_res }}"></div>
+      </div>
+    </details>
+
+    <div class="actions">
+      <button type="submit">Find Waypoints</button>
+    </div>
+  </form>
+</main>
+
+<footer>UR5e demo — collision-aware RRT</footer>
+</body>
+</html>
