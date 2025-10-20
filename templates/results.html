@@ -2,43 +2,85 @@
 <html>
 <head>
   <meta charset="utf-8">
-  <title>Joint Path Planner — Results</title>
-  <link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}">
-  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Planned Waypoints</title>
+  <link rel="stylesheet" href="/static/style.css">
 </head>
 <body>
-<header><h1>Planned Waypoints</h1></header>
+  <h1 class="page-title">Planned Waypoints</h1>
 
-<main>
+  {% if advice %}
+    <div class="card advice-card">
+      <h3>Planner Recommendations</h3>
+      <ul class="advice-list">
+        {% for note in advice.notes %}
+          <li>{{ note }}</li>
+        {% endfor %}
+      </ul>
+      {% if advice.obstacle_moves and advice.obstacle_moves|length > 0 %}
+        <div class="advice-sub">
+          <strong>Obstacle adjustments:</strong>
+          <ul>
+            {% for tip in advice.obstacle_moves %}
+              <li>{{ tip }}</li>
+            {% endfor %}
+          </ul>
+        </div>
+      {% endif %}
+      {% if advice.recommend_waypoints %}
+        <p class="advice-meta">
+          Suggested minimum waypoints for smooth motion:
+          <strong>{{ advice.recommend_waypoints }}</strong>
+        </p>
+      {% endif %}
+    </div>
+  {% endif %}
+
   {% if error %}
-    <div class="card error">
+    <div class="card error-card">
       <h3>Planning failed</h3>
       <p>{{ error }}</p>
-      <a class="btn" href="{{ url_for('index') }}">Back</a>
+      <a class="btn-primary" href="/">Back</a>
     </div>
   {% else %}
-    <div class="card">
+    <div class="card stats-card">
+      <p>Waypoints: {{ n }} | Iters: {{ iters }} | Time: {{ "%.3f"|format(time_sec or 0) }} s{% if reason %} | Note: {{ reason }}{% endif %}</p>
+      <button class="btn-primary" onclick="downloadCSV()">Download CSV</button>
+    </div>
+
+    <div class="table-wrap">
       <table>
-        <thead>
-          <tr><th>#</th><th>J1</th><th>J2</th><th>J3</th><th>J4</th><th>J5</th><th>J6</th></tr>
-        </thead>
+        <thead><tr><th>J1</th><th>J2</th><th>J3</th><th>J4</th><th>J5</th><th>J6</th></tr></thead>
         <tbody>
-          {% for i, q in enumerate(waypoints, start=1) %}
-          <tr>
-            <td>{{ i }}</td>
-            {% for v in q %}<td>{{ '%.2f'|format(v) }}</td>{% endfor %}
-          </tr>
+          {% for q in path_deg %}
+            <tr>{% for v in q %}<td>{{ "%.6f"|format(v) }}</td>{% endfor %}</tr>
           {% endfor %}
         </tbody>
       </table>
-      <div class="actions">
-        <a class="btn" href="{{ csv_url }}" download="planned_waypoints_deg.csv">Download CSV</a>
-        <a class="btn secondary" href="{{ url_for('index') }}">Back</a>
-      </div>
     </div>
-  {% endif %}
-</main>
 
-<footer>UR5e demo — collision-aware RRT</footer>
+    <script>
+      function downloadCSV(){
+        fetch("/download.csv", {
+          method: "POST",
+          headers: {"Content-Type":"application/json"},
+          body: JSON.stringify({path_deg: {{ path_deg|tojson }} })
+        }).then(r=>r.blob()).then(b=>{
+          const url = URL.createObjectURL(b);
+          const a = document.createElement('a');
+          a.href = url; a.download = 'waypoints.csv'; a.click();
+          URL.revokeObjectURL(url);
+        });
+      }
+    </script>
+  {% endif %}
+
+  <footer class="foot">
+    <span>UR5e demo — collision-aware RRT</span>
+    <a href="/" class="mini-link">Home</a>
+  </footer>
+
+  <footer class="watermark">
+    <p>Made by Sooraj</p>
+  </footer>
 </body>
 </html>
