@@ -58,7 +58,7 @@ def plan_rrt_connect(start_q, goal_q, obstacles, knobs):
     """
     Return dict:
       success: bool
-      path_rad: list[list[float]]  # joint waypoints in radians
+      path_rad: list[list[float]]
       iters: int
       time_sec: float
       reason: str|None
@@ -142,5 +142,11 @@ def download_csv():
 def healthz():
     return "ok", 200
 
+# ---------------------------
+# MAIN ENTRY (general & portable)
+# ---------------------------
 if __name__ == "__main__":
-    app.run(host="0.0.0.0", port=int(os.environ.get("PORT", 5000)), debug=True)
+    # Prefer PORT from environment (cloud deployments).
+    # Otherwise default to 5001 to avoid macOS AirPlay blocking 5000.
+    port = int(os.environ.get("PORT", 5001))
+    app.run(host="0.0.0.0", port=port, debug=True)

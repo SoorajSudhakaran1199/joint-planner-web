@@ -6,34 +6,7 @@
   <link rel="stylesheet" href="/static/style.css">
 </head>
 <body>
-  <h1 class="page-title">Planned Waypoints</h1>
-
-  {% if advice %}
-    <div class="card advice-card">
-      <h3>Planner Recommendations</h3>
-      <ul class="advice-list">
-        {% for note in advice.notes %}
-          <li>{{ note }}</li>
-        {% endfor %}
-      </ul>
-      {% if advice.obstacle_moves and advice.obstacle_moves|length > 0 %}
-        <div class="advice-sub">
-          <strong>Obstacle adjustments:</strong>
-          <ul>
-            {% for tip in advice.obstacle_moves %}
-              <li>{{ tip }}</li>
-            {% endfor %}
-          </ul>
-        </div>
-      {% endif %}
-      {% if advice.recommend_waypoints %}
-        <p class="advice-meta">
-          Suggested minimum waypoints for smooth motion:
-          <strong>{{ advice.recommend_waypoints }}</strong>
-        </p>
-      {% endif %}
-    </div>
-  {% endif %}
+  <h1>Planned Waypoints</h1>
 
   {% if error %}
     <div class="card error-card">
@@ -75,12 +48,7 @@
   {% endif %}
 
   <footer class="foot">
-    <span>UR5e demo — collision-aware RRT</span>
     <a href="/" class="mini-link">Home</a>
-  </footer>
-
-  <footer class="watermark">
-    <p>Made by Sooraj</p>
   </footer>
 </body>
 </html>
